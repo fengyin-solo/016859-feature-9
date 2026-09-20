@@ -20,8 +20,10 @@ export interface StreamCallbacks {
   onChunk: (chunk: string) => void;
   /** 流完成时调用 */
   onComplete: (stats: ResponseStats) => void;
-  /** 发生错误时调用 */
-  onError: (error: Error) => void;
+  /** 发生错误时调用；返回 true 时视为调用方已处理完成 */
+  onError: (error: Error) => boolean | void;
+  /** 主动中止时调用 */
+  onAbort?: () => void;
 }
 
 /**
@@ -43,7 +45,7 @@ export class StreamHandler {
   async start(
     stream: AsyncGenerator<string, void, unknown>,
     callbacks: StreamCallbacks
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (this.isActive) {
       this.abort();
     }
@@ -53,6 +55,8 @@ export class StreamHandler {
     this.startTime = Date.now();
     this.firstByteTime = null;
     this.accumulatedContent = '';
+
+    let succeeded = false;
 
     try {
       for await (const chunk of stream) {
@@ -74,11 +78,20 @@ export class StreamHandler {
       if (!this.abortController?.signal.aborted) {
         const stats = this.calculateStats();
         callbacks.onComplete(stats);
+      } else {
+        callbacks.onAbort?.();
       }
+      succeeded = true;
+      return succeeded;
     } catch (error) {
-      if (!this.abortController?.signal.aborted) {
-        callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+      if (this.abortController?.signal.aborted) {
+        callbacks.onAbort?.();
+        succeeded = true;
+      } else {
+        const handled = callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+        succeeded = handled === true;
       }
+      return succeeded;
     } finally {
       this.isActive = false;
       this.abortController = null;
@@ -89,10 +102,7 @@ export class StreamHandler {
    * 中止当前流
    */
   abort(): void {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.isActive = false;
-    }
+    this.abortController?.abort();
   }
 
   /**

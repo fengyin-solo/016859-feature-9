@@ -32,14 +32,18 @@ interface ChatActions {
   addMessage: (conversationId: string, params: CreateMessageParams) => string;
   /** 更新消息 */
   updateMessage: (conversationId: string, messageId: string, updates: Partial<Message>) => void;
+  /** 从对话中移除消息（用于发送失败后回滚） */
+  removeMessages: (conversationId: string, messageIds: string[]) => void;
+  /** 回滚未发送成功的消息及临时标题 */
+  rollbackMessages: (conversationId: string, messageIds: string[]) => void;
   /** 开始流式响应 */
   startStreaming: (conversationId: string) => string;
   /** 追加流式内容 */
-  appendStreamContent: (content: string) => void;
+  appendStreamContent: (conversationId: string, content: string) => void;
   /** 完成流式响应 */
-  finishStreaming: (stats?: Message['stats']) => void;
+  finishStreaming: (conversationId: string, stats?: Message['stats']) => void;
   /** 取消流式响应 */
-  cancelStreaming: () => void;
+  cancelStreaming: (conversationId?: string) => void;
   /** 获取当前活动对话 */
   getActiveConversation: () => Conversation | null;
   /** 清除所有对话 */
@@ -178,19 +182,58 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set(state => {
       const conversations = state.conversations.map(conv => {
         if (conv.id !== conversationId) return conv;
-        
+
         const messages = conv.messages.map(msg => {
           if (msg.id !== messageId) return msg;
           return { ...msg, ...updates };
         });
-        
+
         return {
           ...conv,
           messages,
           updatedAt: Date.now(),
         };
       });
-      
+
+      debouncedSave(conversations);
+      return { conversations };
+    });
+  },
+
+  removeMessages: (conversationId, messageIds) => {
+    set(state => {
+      const idSet = new Set(messageIds);
+      const conversations = state.conversations.map(conv => {
+        if (conv.id !== conversationId) return conv;
+
+        return {
+          ...conv,
+          messages: conv.messages.filter(msg => !idSet.has(msg.id)),
+          updatedAt: Date.now(),
+        };
+      });
+
+      debouncedSave(conversations);
+      return { conversations };
+    });
+  },
+
+  rollbackMessages: (conversationId, messageIds) => {
+    set(state => {
+      const idSet = new Set(messageIds);
+      const conversations = state.conversations.map(conv => {
+        if (conv.id !== conversationId) return conv;
+
+        const messages = conv.messages.filter(msg => !idSet.has(msg.id));
+
+        return {
+          ...conv,
+          messages,
+          title: messages.length === 0 ? '新对话' : conv.title,
+          updatedAt: Date.now(),
+        };
+      });
+
       debouncedSave(conversations);
       return { conversations };
     });
@@ -230,13 +273,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return messageId;
   },
 
-  appendStreamContent: (content) => {
+  appendStreamContent: (conversationId, content) => {
     set(state => {
       const newContent = state.streamingContent + content;
-      
+
       // 同时更新消息内容
       const conversations = state.conversations.map(conv => {
-        if (conv.id !== state.activeConversationId) return conv;
+        if (conv.id !== conversationId) return conv;
         
         const messages = conv.messages.map(msg => {
           if (msg.id !== state.streamingMessageId) return msg;
@@ -253,10 +296,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  finishStreaming: (stats) => {
+  finishStreaming: (conversationId, stats) => {
     set(state => {
       const conversations = state.conversations.map(conv => {
-        if (conv.id !== state.activeConversationId) return conv;
+        if (conv.id !== conversationId) return conv;
         
         const messages = conv.messages.map(msg => {
           if (msg.id !== state.streamingMessageId) return msg;
@@ -286,11 +329,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  cancelStreaming: () => {
+  cancelStreaming: (conversationId = get().activeConversationId || undefined) => {
     set(state => {
       // 保留已接收的内容，但标记为错误状态
       const conversations = state.conversations.map(conv => {
-        if (conv.id !== state.activeConversationId) return conv;
+        if (conv.id !== conversationId) return conv;
         
         const messages = conv.messages.map(msg => {
           if (msg.id !== state.streamingMessageId) return msg;

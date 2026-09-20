@@ -1,4 +1,4 @@
-import type { AppConfig, Conversation, PromptTemplate } from '../types';
+import type { AppConfig, Conversation, Message, PromptTemplate } from '../types';
 import { DEFAULT_CONFIG, DEFAULT_TEMPLATES } from '../types';
 
 // Storage keys
@@ -6,7 +6,10 @@ const STORAGE_KEYS = {
   CONFIG: 'react-chat-config',
   CONVERSATIONS: 'react-chat-conversations',
   PROMPT_TEMPLATES: 'react-chat-prompt-templates',
+  DRAFTS: 'react-chat-drafts',
 } as const;
+
+export const NEW_CONVERSATION_DRAFT_KEY = 'new-conversation';
 
 /**
  * 简单的加密函数（Base64 + 字符偏移）
@@ -30,11 +33,11 @@ function encrypt(text: string): string {
  */
 function decrypt(encoded: string): string {
   if (!encoded) return '';
-  
+
   try {
     // 先 Base64 解码
     const shifted = decodeURIComponent(atob(encoded));
-    
+
     // 然后字符偏移还原
     return shifted
       .split('')
@@ -43,6 +46,17 @@ function decrypt(encoded: string): string {
   } catch {
     return '';
   }
+}
+
+function isPersistableMessage(message: Message): boolean {
+  return message.status === 'complete' || message.status === 'error';
+}
+
+function normalizeConversation(conv: Conversation): Conversation {
+  return {
+    ...conv,
+    messages: conv.messages.filter(isPersistableMessage),
+  };
 }
 
 /**
@@ -106,16 +120,26 @@ export function clearConfig(): void {
  * @param conversations 对话列表
  */
 export function saveConversations(conversations: Conversation[]): void {
+  const persistableConversations = conversations
+    .map(normalizeConversation)
+    .filter(conv => conv.messages.length > 0 || conv.title !== '新对话');
+
   try {
-    localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(conversations));
+    localStorage.setItem(
+      STORAGE_KEYS.CONVERSATIONS,
+      JSON.stringify(persistableConversations)
+    );
   } catch (error) {
     console.error('Failed to save conversations:', error);
     
     // 如果存储失败（可能是超出配额），尝试只保存最近的对话
     if (error instanceof DOMException && error.name === 'QuotaExceededError') {
-      const recentConversations = conversations.slice(0, 10);
+      const recentConversations = persistableConversations.slice(0, 10);
       try {
-        localStorage.setItem(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(recentConversations));
+        localStorage.setItem(
+          STORAGE_KEYS.CONVERSATIONS,
+          JSON.stringify(recentConversations)
+        );
       } catch {
         throw new Error('存储空间不足，无法保存对话');
       }
@@ -144,9 +168,10 @@ export function loadConversations(): Conversation[] {
       return [];
     }
     
-    // 过滤无效数据并按更新时间排序
+    // 过滤无效数据与未提交消息，并按更新时间排序
     return parsed
       .filter(conv => conv && conv.id && Array.isArray(conv.messages))
+      .map(normalizeConversation)
       .sort((a, b) => b.updatedAt - a.updatedAt);
   } catch (error) {
     console.error('Failed to load conversations:', error);
@@ -165,12 +190,101 @@ export function clearConversations(): void {
   }
 }
 
+type DraftMap = Record<string, string>;
+
+function loadDraftMap(): DraftMap {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.DRAFTS);
+    if (!stored) return {};
+
+    const parsed = JSON.parse(stored) as DraftMap;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    console.error('Failed to load drafts:', error);
+    return {};
+  }
+}
+
+/**
+ * 读取指定会话的输入草稿
+ */
+export function loadDraft(conversationId: string): string {
+  return loadDraftMap()[conversationId] || '';
+}
+
+/**
+ * 保存指定会话的输入草稿
+ */
+export function saveDraft(conversationId: string, content: string): void {
+  try {
+    const drafts = loadDraftMap();
+
+    if (content) {
+      drafts[conversationId] = content;
+    } else {
+      delete drafts[conversationId];
+    }
+
+    localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(drafts));
+  } catch (error) {
+    console.error('Failed to save draft:', error);
+    throw new Error('本地草稿保存失败，请重试');
+  }
+}
+
+/**
+ * 将草稿迁移到新的会话键下
+ */
+export function moveDraft(fromConversationId: string, toConversationId: string, content: string): void {
+  try {
+    const drafts = loadDraftMap();
+    delete drafts[fromConversationId];
+
+    if (content) {
+      drafts[toConversationId] = content;
+    }
+
+    localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(drafts));
+  } catch (error) {
+    console.error('Failed to move draft:', error);
+    throw new Error('本地草稿保存失败，请重试');
+  }
+}
+
+/**
+ * 删除指定会话的输入草稿
+ */
+export function removeDraft(conversationId: string): void {
+  try {
+    const drafts = loadDraftMap();
+    if (!(conversationId in drafts)) return;
+
+    delete drafts[conversationId];
+    localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(drafts));
+  } catch (error) {
+    console.error('Failed to remove draft:', error);
+    throw new Error('本地草稿清理失败，请重试');
+  }
+}
+
+/**
+ * 清除所有输入草稿
+ */
+export function clearDrafts(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEYS.DRAFTS);
+  } catch (error) {
+    console.error('Failed to clear drafts:', error);
+  }
+}
+
 /**
  * 清除所有存储数据
  */
 export function clearAllStorage(): void {
   clearConfig();
   clearConversations();
+  clearDrafts();
 }
 
 /**

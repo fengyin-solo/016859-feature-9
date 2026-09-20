@@ -80,16 +80,16 @@ export function useChat() {
 
         await streamHandler.start(stream, {
           onChunk: (chunk) => {
-            appendStreamContent(chunk);
+            appendStreamContent(activeConversationId, chunk);
           },
           onComplete: (stats) => {
-            finishStreaming(toMessageStats(stats));
+            finishStreaming(activeConversationId, toMessageStats(stats));
           },
           onError: (error) => {
             const appError = parseError(error);
             logError(appError, 'useChat.sendMessage');
             message.error(appError.message);
-            cancelStreaming();
+            cancelStreaming(activeConversationId);
 
             if (shouldShowConfigPanel(appError)) {
               setConfigPanelVisible(true);
@@ -100,7 +100,7 @@ export function useChat() {
         const appError = parseError(error);
         logError(appError, 'useChat.sendMessage');
         message.error(appError.message);
-        cancelStreaming();
+        cancelStreaming(activeConversationId);
 
         if (shouldShowConfigPanel(appError)) {
           setConfigPanelVisible(true);

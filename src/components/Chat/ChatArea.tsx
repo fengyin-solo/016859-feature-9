@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { message } from 'antd';
 import { MessageList } from './MessageList';
 import { InputArea } from './InputArea';
@@ -6,7 +6,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useConfigStore } from '../../stores/configStore';
 import { sendMessageStream } from '../../services/api';
 import { createStreamHandler, toMessageStats } from '../../services/stream';
-import { parseError, logError, shouldShowConfigPanel } from '../../services/errorHandler';
+import { parseError, logError, shouldShowConfigPanel, ErrorType } from '../../services/errorHandler';
 import { useUIStore } from '../../stores/uiStore';
 import type { APIMessage } from '../../types';
 import './ChatArea.css';
@@ -24,6 +24,8 @@ export function ChatArea() {
     streamingMessageId,
     getActiveConversation,
     addMessage,
+    updateMessage,
+    rollbackMessages,
     startStreaming,
     appendStreamContent,
     finishStreaming,
@@ -33,34 +35,39 @@ export function ChatArea() {
 
   const { config, isValid: isConfigValid } = useConfigStore();
   const { setConfigPanelVisible } = useUIStore();
+  const sendingRef = useRef(false);
 
   const conversation = getActiveConversation();
   const messages = conversation?.messages || [];
 
   const handleSend = useCallback(
-    async (content: string) => {
+    async (content: string): Promise<boolean> => {
+      if (sendingRef.current) {
+        message.warning('消息正在发送，请勿重复提交');
+        return false;
+      }
+
+      if (isStreaming) {
+        return false;
+      }
+
       if (!isConfigValid) {
         message.warning('请先配置 API Key');
         setConfigPanelVisible(true);
-        return;
+        return false;
       }
 
-      // 如果没有活动对话，自动创建一个
-      let conversationId = activeConversationId;
-      if (!conversationId) {
-        conversationId = createConversation();
-      }
-
-      // 获取当前对话的历史消息（在添加新消息之前）
+      // 先创建会话，保证输入草稿可以立即迁移到该会话下
+      const conversationId = activeConversationId || createConversation();
       const stateBeforeAdd = useChatStore.getState();
       const currentConversation = stateBeforeAdd.conversations.find(c => c.id === conversationId);
       const historyMessages = currentConversation?.messages || [];
 
       // 添加用户消息
-      addMessage(conversationId, {
+      const userMessageId = addMessage(conversationId, {
         role: 'user',
         content,
-        status: 'complete',
+        status: 'pending',
       });
 
       // 准备 API 消息（历史消息 + 当前消息）
@@ -73,7 +80,14 @@ export function ChatArea() {
       ];
 
       // 开始流式响应
-      startStreaming(conversationId);
+      const assistantMessageId = startStreaming(conversationId);
+      sendingRef.current = true;
+
+      const rollbackUnsentMessage = () => {
+        rollbackMessages(conversationId, [userMessageId, assistantMessageId]);
+      };
+
+      let requestSucceeded = false;
 
       try {
         const stream = sendMessageStream(apiMessages, {
@@ -81,54 +95,83 @@ export function ChatArea() {
           stream: true,
         });
 
-        await streamHandler.start(stream, {
+        requestSucceeded = await streamHandler.start(stream, {
           onChunk: (chunk) => {
-            appendStreamContent(chunk);
+            appendStreamContent(conversationId, chunk);
           },
           onComplete: (stats) => {
-            finishStreaming(toMessageStats(stats));
+            updateMessage(conversationId, userMessageId, { status: 'complete' });
+            finishStreaming(conversationId, toMessageStats(stats));
           },
           onError: (error) => {
             const appError = parseError(error);
             logError(appError, 'ChatArea.handleSend');
-            message.error(appError.message);
-            cancelStreaming();
+            const wasNetworkError = appError.type === ErrorType.NETWORK_ERROR;
+
+            rollbackUnsentMessage();
+            cancelStreaming(conversationId);
+
+            if (wasNetworkError) {
+              message.error('网络连接已断开，这条消息没有发出，已保留在草稿中，请重新发送');
+            } else {
+              message.error(appError.message);
+            }
 
             if (shouldShowConfigPanel(appError)) {
               setConfigPanelVisible(true);
             }
+
+            return !wasNetworkError;
+          },
+          onAbort: () => {
+            updateMessage(conversationId, userMessageId, { status: 'complete' });
+            cancelStreaming(conversationId);
           },
         });
+
+        return requestSucceeded;
       } catch (error) {
         const appError = parseError(error);
         logError(appError, 'ChatArea.handleSend');
-        message.error(appError.message);
-        cancelStreaming();
+        rollbackUnsentMessage();
+        cancelStreaming(conversationId);
+
+        if (appError.type === ErrorType.NETWORK_ERROR) {
+          message.error('网络连接已断开，这条消息没有发出，已保留在草稿中，请重新发送');
+        } else {
+          message.error(appError.message);
+        }
 
         if (shouldShowConfigPanel(appError)) {
           setConfigPanelVisible(true);
         }
+
+        return false;
+      } finally {
+        sendingRef.current = false;
       }
     },
     [
       activeConversationId,
       isConfigValid,
+      isStreaming,
       config,
       messages,
       addMessage,
+      updateMessage,
+      rollbackMessages,
       startStreaming,
       appendStreamContent,
       finishStreaming,
       cancelStreaming,
+      createConversation,
       setConfigPanelVisible,
     ]
   );
 
   const handleStop = useCallback(() => {
     streamHandler.abort();
-    cancelStreaming();
-    message.info('已停止响应');
-  }, [cancelStreaming]);
+  }, []);
 
   return (
     <div className="chat-area">
@@ -138,6 +181,7 @@ export function ChatArea() {
         streamingMessageId={streamingMessageId}
       />
       <InputArea
+        conversationId={activeConversationId}
         onSend={handleSend}
         onStop={handleStop}
         isLoading={false}

@@ -73,6 +73,35 @@
   flex-shrink: 0;
 }
 
+.input-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 var(--spacing-sm) var(--spacing-xs);
+}
+
+.input-alert {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.limit-alert {
+  color: var(--color-warning);
+}
+
+.save-alert {
+  color: var(--color-error);
+}
+
+.save-alert .ant-btn {
+  padding: 0;
+  height: auto;
+  font-size: var(--font-size-xs);
+}
+
 .send-button,
 .stop-button {
   height: 40px;
