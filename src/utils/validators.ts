@@ -57,6 +57,24 @@ export function validateMaxTokens(maxTokens: number): boolean {
 }
 
 /**
+ * 输入内容字符数上限
+ */
+export const MAX_MESSAGE_LENGTH = 4000;
+
+/**
+ * 发送前校验结果
+ */
+export type MessageValidationReason = 'empty' | 'tooLong' | 'ok';
+
+export interface MessageValidationResult {
+  reason: MessageValidationReason;
+  /** 去空白后的内容长度 */
+  trimmedLength: number;
+  /** 超出上限的字符数（仅在 tooLong 时有意义） */
+  overflow: number;
+}
+
+/**
  * 验证消息内容
  * @param content 消息内容
  * @returns 是否有效（非空白字符串）
@@ -65,8 +83,44 @@ export function validateMessageContent(content: string): boolean {
   if (!content || typeof content !== 'string') {
     return false;
   }
-  
+
   return content.trim().length > 0;
+}
+
+/**
+ * 统计消息内容长度（按用户输入的字符数计算）
+ * @param content 消息内容
+ * @returns 去空白后的字符数
+ */
+export function getMessageLength(content: string): number {
+  if (!content || typeof content !== 'string') {
+    return 0;
+  }
+  return content.trim().length;
+}
+
+/**
+ * 发送前的完整校验：区分「内容为空」与「超过长度上限」两种情况
+ * @param content 消息内容
+ * @param maxLength 字符数上限，默认 MAX_MESSAGE_LENGTH
+ * @returns 校验结果（含原因与超出字符数）
+ */
+export function validateMessageForSend(
+  content: string,
+  maxLength: number = MAX_MESSAGE_LENGTH
+): MessageValidationResult {
+  const trimmedLength = getMessageLength(content);
+
+  if (trimmedLength === 0) {
+    return { reason: 'empty', trimmedLength, overflow: 0 };
+  }
+
+  const overflow = Math.max(0, trimmedLength - maxLength);
+  if (overflow > 0) {
+    return { reason: 'tooLong', trimmedLength, overflow };
+  }
+
+  return { reason: 'ok', trimmedLength, overflow: 0 };
 }
 
 /**

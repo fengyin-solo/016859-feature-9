@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import type { Conversation, Message, CreateMessageParams } from '../types';
 import { saveConversations, loadConversations } from '../services/storage';
+import { notifyLocalSaveFailure } from '../services/notify';
 import { generateConversationTitle } from '../utils/formatters';
 
 interface ChatState {
@@ -40,6 +41,11 @@ interface ChatActions {
   finishStreaming: (stats?: Message['stats']) => void;
   /** 取消流式响应 */
   cancelStreaming: () => void;
+  /**
+   * 移除指定对话中的若干消息并重置流式状态（发送失败、消息回到草稿时回滚用）
+   * @returns 被移除消息是否存在
+   */
+  removeMessages: (conversationId: string, messageIds: string[]) => void;
   /** 获取当前活动对话 */
   getActiveConversation: () => Conversation | null;
   /** 清除所有对话 */
@@ -52,16 +58,28 @@ type ChatStore = ChatState & ChatActions;
 
 // 持久化保存（防抖）
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 立即执行一次本地保存；失败时给出独立的「重新保存」入口
+ */
+function persistConversations(conversations: Conversation[]): void {
+  try {
+    saveConversations(conversations);
+  } catch {
+    // 本地保存失败：提示并允许重新来一遍，措辞与网络异常等其它场景不同
+    notifyLocalSaveFailure(
+      () => persistConversations(useChatStore.getState().conversations),
+      '对话记录'
+    );
+  }
+}
+
 const debouncedSave = (conversations: Conversation[]) => {
   if (saveTimeout) {
     clearTimeout(saveTimeout);
   }
   saveTimeout = setTimeout(() => {
-    try {
-      saveConversations(conversations);
-    } catch (error) {
-      console.error('Failed to save conversations:', error);
-    }
+    persistConversations(conversations);
   }, 500);
 };
 
@@ -291,7 +309,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // 保留已接收的内容，但标记为错误状态
       const conversations = state.conversations.map(conv => {
         if (conv.id !== state.activeConversationId) return conv;
-        
+
         const messages = conv.messages.map(msg => {
           if (msg.id !== state.streamingMessageId) return msg;
           return {
@@ -300,12 +318,46 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             status: 'error' as const,
           };
         });
-        
+
         return { ...conv, messages };
       });
-      
+
       debouncedSave(conversations);
-      
+
+      return {
+        conversations,
+        isStreaming: false,
+        streamingContent: '',
+        streamingMessageId: null,
+      };
+    });
+  },
+
+  removeMessages: (conversationId, messageIds) => {
+    const idSet = new Set(messageIds);
+
+    set(state => {
+      // 如果要移除的包含流式消息，同步退出流式状态
+      const removingStreamingMessage =
+        state.streamingMessageId !== null && idSet.has(state.streamingMessageId);
+
+      const conversations = state.conversations.map(conv => {
+        if (conv.id !== conversationId) return conv;
+
+        return {
+          ...conv,
+          messages: conv.messages.filter(msg => !idSet.has(msg.id)),
+          updatedAt: Date.now(),
+        };
+      });
+
+      conversations.sort((a, b) => b.updatedAt - a.updatedAt);
+      debouncedSave(conversations);
+
+      if (!removingStreamingMessage) {
+        return { conversations };
+      }
+
       return {
         conversations,
         isStreaming: false,

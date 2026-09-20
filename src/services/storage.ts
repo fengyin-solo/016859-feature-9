@@ -6,7 +6,18 @@ const STORAGE_KEYS = {
   CONFIG: 'react-chat-config',
   CONVERSATIONS: 'react-chat-conversations',
   PROMPT_TEMPLATES: 'react-chat-prompt-templates',
+  DRAFTS: 'react-chat-message-drafts',
 } as const;
+
+/**
+ * 尚未进入任何对话时的草稿键
+ */
+export const NO_CONVERSATION_DRAFT_KEY = '__no_conversation__';
+
+/**
+ * 各对话输入草稿的结构：conversationId -> 草稿文本
+ */
+export type MessageDrafts = Record<string, string>;
 
 /**
  * 简单的加密函数（Base64 + 字符偏移）
@@ -166,11 +177,88 @@ export function clearConversations(): void {
 }
 
 /**
+ * 保存单个对话的输入草稿（发送失败、页面关闭后仍可恢复）
+ * @param conversationKey 对话 ID；没有对话时使用 NO_CONVERSATION_DRAFT_KEY
+ * @param draft 草稿内容；为空字符串时删除该草稿
+ */
+export function saveMessageDraft(conversationKey: string, draft: string): void {
+  const drafts = loadMessageDrafts();
+
+  if (draft) {
+    drafts[conversationKey] = draft;
+  } else {
+    delete drafts[conversationKey];
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEYS.DRAFTS, JSON.stringify(drafts));
+  } catch (error) {
+    console.error('Failed to save message draft:', error);
+    throw new Error('保存草稿失败');
+  }
+}
+
+/**
+ * 读取全部输入草稿
+ * @returns 草稿映射
+ */
+export function loadMessageDrafts(): MessageDrafts {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.DRAFTS);
+    if (!stored) {
+      return {};
+    }
+
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const result: MessageDrafts = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string') {
+        result[key] = value;
+      }
+    }
+    return result;
+  } catch (error) {
+    console.error('Failed to load message drafts:', error);
+    return {};
+  }
+}
+
+/**
+ * 读取指定对话的输入草稿
+ * @param conversationKey 对话 ID；没有对话时使用 NO_CONVERSATION_DRAFT_KEY
+ * @returns 草稿内容，不存在时返回空字符串
+ */
+export function loadMessageDraft(conversationKey: string): string {
+  return loadMessageDrafts()[conversationKey] ?? '';
+}
+
+/**
+ * 删除指定对话的输入草稿（消息发送成功后调用）
+ * @param conversationKey 对话 ID
+ */
+export function clearMessageDraft(conversationKey: string): void {
+  try {
+    saveMessageDraft(conversationKey, '');
+  } catch (error) {
+    console.error('Failed to clear message draft:', error);
+  }
+}
+
+/**
  * 清除所有存储数据
  */
 export function clearAllStorage(): void {
   clearConfig();
   clearConversations();
+  try {
+    localStorage.removeItem(STORAGE_KEYS.DRAFTS);
+  } catch (error) {
+    console.error('Failed to clear message drafts:', error);
+  }
 }
 
 /**

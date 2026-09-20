@@ -154,8 +154,8 @@ export function parseError(error: unknown): AppError {
     }
   }
 
-  // 处理网络错误
-  if (error instanceof TypeError && error.message.includes('fetch')) {
+  // 处理网络错误：原生 fetch 失败或 OpenAI SDK 包装的 APIConnectionError
+  if (isNetworkLikeError(error)) {
     return {
       type: ErrorType.NETWORK_ERROR,
       message: ERROR_MESSAGES[ErrorType.NETWORK_ERROR],
@@ -201,6 +201,35 @@ export function parseError(error: unknown): AppError {
     details: error,
     retryable: true,
   };
+}
+
+/**
+ * 判断错误是否为「网络连不上」类错误（而非服务端返回的业务错误）
+ * 覆盖原生 fetch TypeError、OpenAI SDK 的 APIConnectionError 等
+ */
+function isNetworkLikeError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+
+  const err = error as { name?: string; message?: string; status?: number };
+
+  // OpenAI SDK 连接错误带 name/constructor 名 APIConnectionError，且没有 HTTP 状态码
+  const typeName =
+    typeof (error as { constructor?: { name?: string } }).constructor?.name === 'string'
+      ? (error as { constructor: { name: string } }).constructor.name
+      : '';
+  if (typeName === 'APIConnectionError') {
+    return true;
+  }
+  if (typeof err.name === 'string' && err.name === 'APIConnectionError') {
+    return true;
+  }
+
+  // 原生 fetch 在网络层失败时抛出 TypeError（Failed to fetch / NetworkError ...）
+  if (error instanceof TypeError && typeof err.message === 'string') {
+    return /fetch|network|networkerror|failed to fetch|load failed/i.test(err.message);
+  }
+
+  return false;
 }
 
 /**
